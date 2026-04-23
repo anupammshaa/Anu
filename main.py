@@ -4,77 +4,83 @@ from flask import Flask
 import threading
 import os
 
-# Telegram Bot Setup
 TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
-# --- YAHAN AAPKO APNE APP KI DETAILS DAALNI HAIN ---
-LOGIN_URL = "https://aapke-app.com/api/login" 
-VIDEO_URL_FORMAT = "https://aapke-app.com/api/video/" 
-APP_USERNAME = "aapka_email@gmail.com"
-APP_PASSWORD = "aapka_password"
+# Aapka asli Classplus API Link (contentId ke aage ka hissa user chat se dega)
+VIDEO_URL_FORMAT = "https://api.classplusapp.com/cams/uploader/video/jw-signed-url?contentId=" 
 
-def download_video(video_id):
-    session = requests.Session()
-    
-    # Login details
-    login_data = {
-        'username': APP_USERNAME,
-        'password': APP_PASSWORD
-    }
-    
-    try:
-        # 1. Login process
-        login_response = session.post(LOGIN_URL, data=login_data)
-        if login_response.status_code in [200, 201]:
-            
-            # 2. Video fetch process
-            video_url = f"{VIDEO_URL_FORMAT}{video_id}"
-            video_response = session.get(video_url, stream=True)
-            
-            if video_response.status_code == 200:
-                filename = f"video_{video_id}.mp4"
-                with open(filename, 'wb') as f:
-                    for chunk in video_response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                return filename
-            else:
-                return "VIDEO_ERROR"
-        else:
-            return "LOGIN_ERROR"
-    except:
-        return "NETWORK_ERROR"
+user_data = {}
 
-# --- TELEGRAM COMMANDS ---
+# --- 1. START COMMAND ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Hello! Main ready hu. Video ID aise bhejein: /video 12345")
+    bot.reply_to(message, "Welcome Anupam bhai! 👋\nClassplus app se video link nikalne ke liye bot ready hai.\nSabse pehle apna Token save karne ke liye dabayein 👉 /login")
 
+# --- 2. TOKEN SUBMIT KARNA ---
+@bot.message_handler(commands=['login'])
+def ask_token(message):
+    msg = bot.reply_to(message, "Kripya PC ke Network tab se nikala gaya lamba wala **x-access-token** yahan paste karein:")
+    bot.register_next_step_handler(msg, save_token)
+
+def save_token(message):
+    chat_id = message.chat.id
+    user_data[chat_id] = message.text # Token save kar liya
+    
+    # Security ke liye token delete karna
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except:
+        pass
+        
+    bot.reply_to(message, "✅ Token successfully save ho gaya! \nAb aap video ki ID bhej sakte hain. \nExample: `/video U2FsdGV...` (video ka lamba encrypted ID)")
+
+# --- 3. VIDEO FETCH PROCESS (.m3u8 link nikalna) ---
 @bot.message_handler(commands=['video'])
 def handle_video(message):
+    chat_id = message.chat.id
+    
+    if chat_id not in user_data:
+        bot.reply_to(message, "⚠️ Pehle aapko apna Token dalna hoga! Kripya `/login` par click karein.")
+        return
+
     parts = message.text.split()
     if len(parts) < 2:
-        bot.reply_to(message, "Sahi format: /video 12345")
+        bot.reply_to(message, "Sahi format use karein: `/video [Video_ID_Code]`")
         return
         
     video_id = parts[1]
-    bot.reply_to(message, f"Video {video_id} fetch kar raha hu. Kripya wait karein...")
+    bot.reply_to(message, "Aapke Token se video ka link dhoondh raha hu. Wait karein...")
     
-    result = download_video(video_id)
+    my_token = user_data[chat_id]
     
-    if result == "LOGIN_ERROR":
-        bot.reply_to(message, "❌ App login fail ho gaya.")
-    elif result == "VIDEO_ERROR":
-        bot.reply_to(message, "❌ Video nahi mila.")
-    elif result == "NETWORK_ERROR":
-        bot.reply_to(message, "❌ Network Error.")
-    else:
-        bot.reply_to(message, "✅ Video mil gaya! Upload kar raha hu...")
-        with open(result, 'rb') as v_file:
-            bot.send_video(message.chat.id, v_file)
-        os.remove(result) # Server se video delete karna taaki memory full na ho
+    # Classplus header format
+    headers = {
+        'x-access-token': my_token
+    }
+    
+    video_url = f"{VIDEO_URL_FORMAT}{video_id}"
+    
+    try:
+        # API request
+        api_response = requests.get(video_url, headers=headers)
+        
+        if api_response.status_code == 200:
+            data = api_response.json()
+            
+            # API ke answer me se "url" wala hissa nikalna
+            if "url" in data:
+                m3u8_link = data["url"]
+                bot.reply_to(message, f"✅ **SUCCESS! Video Link Mil Gaya:**\n\n`{m3u8_link}`\n\nIs link ko copy karke aap 1DM app, VLC Player, ya kisi bhi m3u8 downloader me daal kar video dekh ya download kar sakte hain.")
+            else:
+                bot.reply_to(message, "⚠️ API ne data bheja par usme 'url' nahi mila. Sayad Token valid nahi hai.")
+        else:
+            bot.reply_to(message, f"❌ Error: Sayad Token expire ho gaya hai ya Video ID galat hai. (Status Code: {api_response.status_code})")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ Server ya Network Error: {e}")
 
-# --- SERVER KEEP-ALIVE SETUP ---
+# --- SERVER KEEP-ALIVE ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -82,9 +88,9 @@ def home():
     return "Bot is Active!"
 
 def run_bot():
-    bot.polling()
+    bot.polling(none_stop=True)
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
-  
+                
